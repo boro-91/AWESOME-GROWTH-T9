@@ -204,3 +204,5 @@ finally:
 
     lcd.clear()
     lcd.clear()
+
+    test 2
