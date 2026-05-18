@@ -1,208 +1,174 @@
 import time
+import csv
+import os
+from datetime import datetime
 
 import board
-
 import adafruit_dht
-
 import RPi.GPIO as GPIO
-
 from RPLCD.i2c import CharLCD
 
-from luma.led_matrix.device import max7219
-
-from luma.core.interface.serial import spi
-
-from luma.core.render import canvas
-
-# --- CONFIG ---
-
-DHT_PIN_BOARD = board.D4
-
-PIN_BODEN = 17
-
-NEBEL_1 = 27
-
-NEBEL_2 = 23
-
-PIN_HEIZUNG = 16
-
+# ==========================================
+# HARDWARE KONFIGURATION (BCM GPIO Nummern)
+# ==========================================
+# BOARD 2: KRAFTWERK (Weiss) - Starkstrom
 PIN_LUEFTER = 18
+PIN_NEBEL_1 = 27
 
-TEMP_MIN = 18.0
+# BOARD 1: ZENTRALE (Schwarz) - Sensoren & Signal
+PIN_BODEN = 17
+PIN_HEIZUNG = 25
 
-TEMP_MAX = 28.0
+# --- SCHWELLENWERTE ---
+TEMP_MAX = 25.0
+TEMP_MIN = 22.0
 
-HUM_TARGET = 35.0
+# --- CSV KONFIGURATION ---
+CSV_DATEI = "gewaechshaus_log.csv"
+CSV_SPALTEN = [
+    "zeitstempel",
+    "temperatur_c",
+    "luftfeuchte_pct",
+    "boden_trocken",
+    "klima_status",
+    "bewaesserung_aktiv",
+    "luefter_an",
+    "heizung_an",
+    "nebel_an"
+]
 
-# --- SETUP ---
-
+# ==========================================
+# SETUP DER HARDWARE
+# ==========================================
 GPIO.setwarnings(False)
-
 GPIO.setmode(GPIO.BCM)
+GPIO.setup([PIN_LUEFTER, PIN_NEBEL_1, PIN_HEIZUNG], GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(PIN_BODEN, GPIO.IN)
 
-GPIO.setup([PIN_BODEN], GPIO.IN)
-
-GPIO.setup([NEBEL_1, NEBEL_2, PIN_HEIZUNG, PIN_LUEFTER], GPIO.OUT)
-
-dht_device = adafruit_dht.DHT22(DHT_PIN_BOARD, use_pulseio=False)
-
-lcd = CharLCD('PCF8574', 0x27)
-
-serial_matrix = spi(port=0, device=0, gpio_SCLK=11, gpio_MOSI=10, gpio_CS=8)
-
-matrix = max7219(serial_matrix, cascaded=1, block_orientation=0, rotate=1)
-
-
-# --- NEUE MATRIX FUNKTIONEN ---
-
-
-def zeige_heizung_voll():
-    # Alle LEDs an fuer die Heizung
-
-    with canvas(matrix) as draw:
-        for i in range(8):
-            draw.line((0, i, 7, i), fill="white")
-
-
-def zeige_luefter_drehend(wiederholungen=3):
-    # Animiertes X und Plus wechselnd fuer Rotation
-
-    for _ in range(wiederholungen):
-        with canvas(matrix) as draw:
-            draw.line((0, 0, 7, 7), fill="white")
-
-            draw.line((0, 7, 7, 0), fill="white")
-
-        time.sleep(0.1)
-
-        with canvas(matrix) as draw:
-            draw.line((3, 0, 3, 7), fill="white")
-
-            draw.line((0, 3, 7, 3), fill="white")
-
-        time.sleep(0.1)
-
-
-def draw_ok():
-    with canvas(matrix) as draw:
-        draw.rectangle((2, 2, 5, 5), outline="white")
-
-
-def lcd_scroll_text(line1, scroll_text):
-    padding = " " * 16
-
-    full_text = padding + scroll_text + padding
-
-    for i in range(len(full_text) - 16 + 1):
-        lcd.clear()
-
-        lcd.write_string(line1 + "\r\n")
-
-        lcd.write_string(full_text[i:i + 16])
-
-        time.sleep(0.15)  # Etwas flotter eingestellt
-
-
-print("System starting with Animations...")
+dht_device = adafruit_dht.DHT22(board.D4, use_pulseio=False)
 
 try:
+    lcd = CharLCD('PCF8574', 0x27)
+    lcd.clear()
+    print("LCD Zentrale: BEREIT")
+except:
+    lcd = None
+    print("LCD Fehler: Verkabelung prüfen.")
 
+# ==========================================
+# CSV VORBEREITEN
+# ==========================================
+datei_existiert = os.path.isfile(CSV_DATEI)
+
+csv_file = open(CSV_DATEI, mode='a', newline='', buffering=1)
+csv_writer = csv.writer(csv_file)
+
+# Header nur schreiben, wenn die Datei neu ist
+if not datei_existiert:
+    csv_writer.writerow(CSV_SPALTEN)
+    print(f"Neue Log-Datei erstellt: {CSV_DATEI}")
+else:
+    print(f"Hänge an bestehende Log-Datei an: {CSV_DATEI}")
+
+print("========================================")
+print(" INTELLIGENTES GEWÄCHSHAUS AKTIV")
+print(" (Modus: Multi-Tasking + CSV-Logging)")
+print("========================================")
+
+letzter_klima_status = ""
+
+try:
     while True:
-
         try:
-
+            # 1. DATEN LESEN
             temp = dht_device.temperature
-
             hum = dht_device.humidity
+            boden_trocken = (GPIO.input(PIN_BODEN) == GPIO.HIGH)
 
-            ground_dry = (GPIO.input(PIN_BODEN) == GPIO.HIGH)
-
-            if temp is None or hum is None:
+            if temp is None:
                 time.sleep(2)
-
                 continue
 
-                # Logik Temperatur & Matrix Animationen
+            # Variable um Bewässerung zu tracken
+            bewaesserung_aktiv = False
 
-            if temp < TEMP_MIN:
+            # 2. LCD ANZEIGE
+            if lcd:
+                try:
+                    lcd.clear()
+                    lcd.cursor_pos = (0, 0)
+                    lcd.write_string(f"T:{temp:.1f}C H:{hum:.0f}%")
+                    lcd.cursor_pos = (1, 0)
+                    lcd.write_string(f"Erde: {'TROCKEN' if boden_trocken else 'FEUCHT'}")
+                except OSError:
+                    pass
 
-                GPIO.output(PIN_HEIZUNG, GPIO.HIGH);
-                GPIO.output(PIN_LUEFTER, GPIO.LOW)
+            # 3. GEHIRNHÄLFTE 1: TEMPERATUR-LOGIK
+            if temp > TEMP_MAX:
+                if letzter_klima_status != "KUEHLEN":
+                    print(f"[{temp}°C] ZU WARM! Kühlung startet...")
+                    GPIO.output(PIN_HEIZUNG, GPIO.LOW)
+                    letzter_klima_status = "KUEHLEN"
 
-                zeige_heizung_voll()  # Vollbild-LED
-
-                h_stat = "HEIZ"
-
-            elif temp > TEMP_MAX:
-
-                GPIO.output(PIN_HEIZUNG, GPIO.LOW);
                 GPIO.output(PIN_LUEFTER, GPIO.HIGH)
-
-                zeige_luefter_drehend()  # Rotation
-
-                h_stat = "KUEHL"
-
-            else:
-
-                GPIO.output(PIN_HEIZUNG, GPIO.LOW);
+                time.sleep(3)
                 GPIO.output(PIN_LUEFTER, GPIO.LOW)
+                time.sleep(1)
+                GPIO.output(PIN_NEBEL_1, GPIO.HIGH)
+                time.sleep(5)
+                GPIO.output(PIN_NEBEL_1, GPIO.LOW)
 
-                draw_ok()
-
-                h_stat = " OK "
-
-                # Logik Vernebler (Boden hat Prio vor Luft)
-
-            if ground_dry:
-
-                GPIO.output(NEBEL_1, GPIO.HIGH);
-                GPIO.output(NEBEL_2, GPIO.HIGH)
-
-                n_stat = "BODEN"
-
-            elif hum < HUM_TARGET:
-
-                GPIO.output(NEBEL_1, GPIO.HIGH);
-                GPIO.output(NEBEL_2, GPIO.LOW)
-
-                n_stat = "LUFT "
+            elif temp < TEMP_MIN:
+                if letzter_klima_status != "HEIZEN":
+                    print(f"[{temp}°C] ZU KALT! Bar-Graph Heizung EIN.")
+                    GPIO.output(PIN_LUEFTER, GPIO.LOW)
+                    GPIO.output(PIN_HEIZUNG, GPIO.HIGH)
+                    letzter_klima_status = "HEIZEN"
 
             else:
+                if letzter_klima_status != "OK":
+                    print(f"[{temp}°C] Temperatur ideal.")
+                    GPIO.output([PIN_LUEFTER, PIN_HEIZUNG], GPIO.LOW)
+                    letzter_klima_status = "OK"
 
-                GPIO.output(NEBEL_1, GPIO.LOW);
-                GPIO.output(NEBEL_2, GPIO.LOW)
+            # 4. GEHIRNHÄLFTE 2: BEWÄSSERUNGS-LOGIK
+            if boden_trocken:
+                print("BEWÄSSERUNG: Bodenfeuchte kritisch! Vernebler startet...")
+                GPIO.output(PIN_NEBEL_1, GPIO.HIGH)
+                time.sleep(5)
+                GPIO.output(PIN_NEBEL_1, GPIO.LOW)
+                print("Bewässerung beendet.")
+                bewaesserung_aktiv = True
+                time.sleep(2)
+            else:
+                if letzter_klima_status != "KUEHLEN":
+                    GPIO.output(PIN_NEBEL_1, GPIO.LOW)
 
-                n_stat = " AUS "
-
-                # Anzeige zusammenbauen
-
-            line1_text = f"T:{h_stat}  H:{n_stat}"
-
-            scrolling_info = f"Temperatur: {temp:.1f}C  Feuchte: {hum:.1f}%  Boden: {'TROCKEN' if ground_dry else 'FEUCHT'}"
-
-            lcd_scroll_text(line1_text, scrolling_info)
-
-
-
-        except RuntimeError:
+            # 5. CSV ZEILE SCHREIBEN
+            csv_writer.writerow([
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                round(temp, 1),
+                round(hum, 1),
+                boden_trocken,
+                letzter_klima_status,
+                bewaesserung_aktiv,
+                GPIO.input(PIN_LUEFTER),
+                GPIO.input(PIN_HEIZUNG),
+                GPIO.input(PIN_NEBEL_1)
+            ])
 
             time.sleep(2)
 
+        except RuntimeError:
+            time.sleep(2)
             continue
 
-
-
 except KeyboardInterrupt:
-
-    print("Stop")
+    print("\nSystem beendet.")
 
 finally:
-
+    csv_file.close()
     GPIO.cleanup()
-
-    matrix.clear()
-
-    lcd.clear()
-    lcd.clear()
-
-    test 2
+    if lcd:
+        lcd.clear()
+    print("Hardware gesichert. CSV-Datei geschlossen.")
